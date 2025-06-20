@@ -5,6 +5,8 @@ import os
 from PIL import Image
 from io import BytesIO
 import base64
+import pytesseract
+import cv2
 
 def classify_block(block, page_height):
     block_type = 'Unknown'
@@ -55,6 +57,20 @@ def save_image(image_bytes, image_ext, page_num, img_index):
         img_file.write(image_bytes)
     return image_filename
 
+def preprocess_image_for_ocr(image_path):
+    """Preprocess image for better OCR accuracy."""
+    image = cv2.imread(image_path)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    return thresh
+
+def extract_text_from_image(image_path):
+    """Extract text from an image using OCR."""
+    processed_image = preprocess_image_for_ocr(image_path)
+    text = pytesseract.image_to_string(processed_image)
+    return text.strip()
+
 def extract_and_classify(pdf_path):
     doc = fitz.open(pdf_path)
     pdf_data = []
@@ -69,6 +85,37 @@ def extract_and_classify(pdf_path):
         }
         
         text_blocks = page.get_text("blocks")
+        # If no text blocks, treat as scanned page
+        is_scanned = all(len(block[4].strip()) == 0 for block in text_blocks)
+        
+        if is_scanned:
+            # Extract images and run OCR
+            images = []
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]
+                image_path = save_image(image_bytes, image_ext, page_num, img_index)
+                # OCR on saved image
+                ocr_text = extract_text_from_image(image_path)
+                block_data = {
+                    "type": "OCR_Text",
+                    "content": sanitize_text(ocr_text)
+                }
+                block_key = f"OCR_Text:{ocr_text}"
+                if block_key not in extracted_data:
+                    extracted_data.add(block_key)
+                    page_data["blocks"].append(block_data)
+                image_data = {
+                    "image_index": img_index + 1,
+                    "image_format": image_ext,
+                    "image_data": image_path
+                }
+                images.append(image_data)
+            page_data["images"] = images
+            pdf_data.append(page_data)
+            continue
         
         for block in text_blocks:
             block_type = classify_block(block, page_height)
@@ -79,8 +126,6 @@ def extract_and_classify(pdf_path):
                 "type": block_type,
                 "content": block_content
             }
-            
-            # Check if the block data is already extracted
             block_key = f"{block_type}:{block_content}"
             if block_key not in extracted_data:
                 extracted_data.add(block_key)
@@ -93,17 +138,13 @@ def extract_and_classify(pdf_path):
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
             image_ext = base_image["ext"]
-            
-            # Save the image to disk and get the file path
             image_path = save_image(image_bytes, image_ext, page_num, img_index)
-            
             image_data = {
                 "image_index": img_index + 1,
                 "image_format": image_ext,
                 "image_data": image_path
             }
             images.append(image_data)
-        
         page_data["images"] = images
         pdf_data.append(page_data)
     
@@ -112,5 +153,5 @@ def extract_and_classify(pdf_path):
         json.dump(pdf_data, json_file, ensure_ascii=False, indent=4)
 
 # Example usage
-pdf_path = "TM-VE50T.pdf"
+pdf_path = "ANY PDF FILE PATH HERE"
 extract_and_classify(pdf_path)
